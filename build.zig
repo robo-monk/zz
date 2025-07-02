@@ -1,5 +1,13 @@
 const std = @import("std");
 
+fn sdkPath(comptime suffix: []const u8) []const u8 {
+    if (suffix[0] != '/') @compileError("suffix must be an absolute path");
+    return comptime blk: {
+        const root_dir = std.fs.path.dirname(@src().file) orelse ".";
+        break :blk root_dir ++ suffix;
+    };
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -47,14 +55,53 @@ pub fn build(b: *std.Build) void {
 
     exe.step.dependOn(swift_step);
 
+    exe.addSystemIncludePath(.{ .cwd_relative = sdkPath("/macosx-sdks/include") });
+    exe.addLibraryPath(.{ .cwd_relative = sdkPath("/macosx-sdks/lib") });
+    exe.addLibraryPath(.{ .cwd_relative = sdkPath("/macosx-sdks/lib/swift") });
+    exe.addSystemFrameworkPath(.{ .cwd_relative = sdkPath("/macosx-sdks/Frameworks") });
+
     // exe.addCSourceFile(.{ .file = b.path("sw-auth.o"), .flags = &.{} });
     exe.linkLibC();
     exe.addObjectFile(b.path("sw-auth.o"));
 
     // link to swift libs
-    exe.addLibraryPath(b.path("libs/swift")); // or the actual path returned
+    // exe.addLibraryPath(b.path("libs/macosx/swift")); // or the actual path returned
+    // exe.addSystemFrameworkPath(.{ .cwd_relative = b.path("libs/macosx/Foundation") });
+    // exe.addSystemFrameworkPath(.{ .cwd_relative = sdkPath("/libs/macosx/Frameworks") });
+    // exe.addSystemIncludePath(.{ .cwd_relative = sdkPath("/include") });
+
     exe.linkSystemLibrary("swiftCore");
     exe.linkSystemLibrary("swiftSwiftOnoneSupport"); // sometimes needed
+
+    const swiftLibs = [_][]const u8{
+        "swiftCore",
+        "swiftCoreFoundation",
+        "swiftDarwin",
+        "swiftDispatch",
+        "swiftIOKit",
+        "swiftObjectiveC",
+        "swiftXPC",
+    };
+
+    for (swiftLibs) |lib| {
+        exe.linkSystemLibrary(lib);
+    }
+    // Transitive dependencies, explicit linkage of these works around
+    // ziglang/zig#17130
+    exe.linkFramework("CFNetwork");
+    exe.linkFramework("ApplicationServices");
+    exe.linkFramework("LocalAuthentication");
+    exe.linkFramework("ColorSync");
+    exe.linkFramework("CoreText");
+    exe.linkFramework("ImageIO");
+    exe.linkSystemLibrary("objc");
+
+    exe.linkFramework("IOKit");
+    exe.linkFramework("CoreFoundation");
+    exe.linkFramework("AppKit");
+    exe.linkFramework("CoreServices");
+    exe.linkFramework("CoreGraphics");
+    exe.linkFramework("Foundation");
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
