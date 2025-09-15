@@ -25,16 +25,17 @@ pub fn build(b: *std.Build) void {
 
     // compile the swift stuff
     //
+    // Compile all Swift sources together so they share one Swift module,
+    // enabling direct Swift-to-Swift calls across files.
     const swift_build_cmd = b.addSystemCommand(&[_][]const u8{
         "swiftc",
         "-emit-object",
         "-parse-as-library",
         "src/auth.swift",
-        "-o",
-        "sw-auth.o",
+        "src/tray.swift",
     });
 
-    const swift_step = b.step("build-swift", "Compile Swift code and link it");
+    const swift_step = b.step("build-swift", "Compile Swift UI/auth code");
     swift_step.dependOn(&swift_build_cmd.step);
 
     // We will also create a module for our other entry point, 'main.zig'.
@@ -62,7 +63,8 @@ pub fn build(b: *std.Build) void {
 
     // exe.addCSourceFile(.{ .file = b.path("sw-auth.o"), .flags = &.{} });
     exe.linkLibC();
-    exe.addObjectFile(b.path("sw-auth.o"));
+    exe.addObjectFile(b.path("auth.o"));
+    exe.addObjectFile(b.path("tray.o"));
 
     // link to swift libs
     // exe.addLibraryPath(b.path("libs/macosx/swift")); // or the actual path returned
@@ -81,6 +83,12 @@ pub fn build(b: *std.Build) void {
         "swiftIOKit",
         "swiftObjectiveC",
         "swiftXPC",
+        // Swift overlays often required by AppKit usage
+        "swiftCoreImage",
+        "swiftMetal",
+        "swiftQuartzCore",
+        "swiftUniformTypeIdentifiers",
+        "swiftos",
     };
 
     for (swiftLibs) |lib| {
@@ -101,6 +109,10 @@ pub fn build(b: *std.Build) void {
     exe.linkFramework("AppKit");
     exe.linkFramework("CoreServices");
     exe.linkFramework("CoreGraphics");
+    exe.linkFramework("QuartzCore");
+    exe.linkFramework("CoreImage");
+    exe.linkFramework("UniformTypeIdentifiers");
+    exe.linkFramework("Metal");
     exe.linkFramework("Foundation");
 
     // This declares intent for the executable to be installed into the

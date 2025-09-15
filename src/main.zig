@@ -1,9 +1,8 @@
 const std = @import("std");
 
-extern fn hello() i32;
-
+extern fn startTray() void;
 pub fn main() !void {
-    const ret = hello();
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us ({}).\n", .{ "codebase", ret });
+    // Launch the macOS status bar (tray) app written in Swift.
+    // This call blocks while the app run loop is active.
+    startTray();
 }
