@@ -1,8 +1,9 @@
 const std = @import("std");
+const core = @import("core.zig");
 
 extern fn startTray() void;
+
 pub fn main() !void {
-    // Launch the macOS status bar (tray) app written in Swift.
-    // This call blocks while the app run loop is active.
+    core.zig_init();
     startTray();
 }

@@ -1,46 +1,76 @@
 import AppKit
 
+@_silgen_name("zig_on_set_task_name")
+func zig_on_set_task_name(_ name: UnsafePointer<CChar>)
+@_silgen_name("zig_on_start_pause")
+func zig_on_start_pause()
+@_silgen_name("zig_on_end_task")
+func zig_on_end_task()
+@_silgen_name("zig_on_tick_write_title")
+func zig_on_tick_write_title(_ buf: UnsafeMutablePointer<CChar>, _ len: Int) -> Int
+@_silgen_name("zig_on_focus_changed_stable")
+func zig_on_focus_changed_stable(_ app: UnsafePointer<CChar>)
+@_silgen_name("zig_on_periodic_screenshot")
+func zig_on_periodic_screenshot()
+@_silgen_name("zig_get_tasks_root_path")
+func zig_get_tasks_root_path(_ buf: UnsafeMutablePointer<CChar>, _ len: Int) -> Int
+
+private var globalStatusItem: NSStatusItem?
+
+@_cdecl("ui_set_tray_title")
+public func ui_set_tray_title(_ title: UnsafePointer<CChar>) {
+    let s = String(cString: title)
+    DispatchQueue.main.async {
+        globalStatusItem?.button?.title = s
+    }
+}
+
+// private func takeScreenshot() { guard let folder = screenshotsFolderURL() else { return }
+//     guard let cgImage = CGWindowListCreateImage(.infinite, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]) else { return }
+//     let rep = NSBitmapImageRep(cgImage: cgImage)
+//     guard let data = rep.representation(using: .png, properties: [:]) else { return } let df = DateFormatter() df.dateFormat = "yyyyMMdd_HHmmss"
+//     let name = "screenshot_\(df.string(from: Date())).png"
+//     let url = folder.appendingPathComponent(name, isDirectory: false) do { try data.write(to: url) } catch { NSLog("Failed to write screenshot: \(error.localizedDescription)") } }
+
+@_cdecl("ui_take_screenshot_at")
+public func ui_take_screenshot_at(_ cpath: UnsafePointer<CChar>) -> Bool {
+    let path = String(cString: cpath)
+    let url = URL(fileURLWithPath: path, isDirectory: false)
+    let dir = url.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    guard let cgImage = CGWindowListCreateImage(.infinite, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]) else { return false }
+    let rep = NSBitmapImageRep(cgImage: cgImage)
+    guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.2]) else { return false }
+    do { try data.write(to: url); return true } catch { NSLog("Write screenshot failed: \(error.localizedDescription)"); return false }
+}
+
+
+
 private class AppDelegate: NSObject, NSApplicationDelegate {
-    // Task state
+    // UI-only state
+    private var isRunning = false
     private var taskName: String = ""
-    private var isRunning: Bool = false
-    private var baseElapsed: TimeInterval = 0 // seconds accumulated while paused
-    private var startDate: Date? = nil        // when currently running
+
+    // Timers
     private var tickTimer: Timer? = nil
-    private var screenshotTimer: Timer? = nil
+    private var periodicShotTimer: Timer? = nil
+    private var focusShotTimer: Timer? = nil
+    private var focusShotTargetApp: String? = nil
 
     // UI references
     private var statusItem: NSStatusItem?
     private var startPauseItem: NSMenuItem?
     private var taskNameItem: NSMenuItem?
 
-    // Session + persistence
-    private var currentSessionFolderName: String? = nil
-    private var sessionStart: Date? = nil
-
-    // Focused app tracking
+    // Focus tracking (UI debounce only)
     private var focusObserver: NSObjectProtocol?
     private var lastActiveAppName: String? = nil
-    private var lastFocusChange: Date? = nil
-    private var appDurations: [String: TimeInterval] = [:]
-    private var focusShotTimer: Timer? = nil
-    private var focusShotTargetApp: String? = nil
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        updateStatusItemTitle() // initialize title
         installFocusObserver()
     }
 
     // MARK: - Menu Actions
-    // @objc func sayHello(_ sender: Any?) {
-    //     NSLog("Hello from the tray menu!")
-    // }
-
-    // @objc func doFingerprint(_ sender: Any?) {
-    //     let success = fingerprint()
-    //     NSLog("Fingerprint auth result: \(success)")
-    // }
-
     @objc func setTaskName(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "Set Task Name"
@@ -52,179 +82,89 @@ private class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first {
-            alert.beginSheetModal(for: window) { [weak self] resp in
-                guard let self = self else { return }
-                if resp == .alertFirstButtonReturn {
-                    self.taskName = input.stringValue
-                    self.updateTooltip()
-                    self.updateTaskNameItem()
-                }
-            }
-        } else {
-            let resp = alert.runModal()
-            if resp == .alertFirstButtonReturn {
-                taskName = input.stringValue
-                updateTooltip()
-                updateTaskNameItem()
-            }
+        let resp = alert.runModal()
+        if resp == .alertFirstButtonReturn {
+            taskName = input.stringValue
+            taskNameItem?.title = taskName.isEmpty ? "Set Task Name" : taskName
+            taskNameItem?.isEnabled = taskName.isEmpty
+            taskName.withCString { zig_on_set_task_name($0) }
         }
     }
 
     @objc func toggleStartPause(_ sender: Any?) {
-        if isRunning { pause() } else { start() }
-    }
-
-    @objc func endTask(_ sender: Any?) {
-        // Stop and reset
-        // First, finalize elapsed time
-        if isRunning, let started = startDate {
-            baseElapsed += Date().timeIntervalSince(started)
-        }
-
-        // Persist task if any time was recorded or name set
-        if baseElapsed > 0 || !taskName.isEmpty {
-            persistTask()
-        }
-
-        tickTimer?.invalidate(); tickTimer = nil
-        screenshotTimer?.invalidate(); screenshotTimer = nil
-        isRunning = false
-        baseElapsed = 0
-        startDate = nil
-        taskName = ""
-        sessionStart = nil
-        updateStatusItemTitle()
+        zig_on_start_pause()
+        isRunning.toggle()
         updateStartPauseTitle()
-        updateTooltip()
-        updateTaskNameItem()
-        currentSessionFolderName = nil
-    }
-
-    // MARK: - Timer / State Helpers
-    private func start() {
-        if !isRunning {
-            // Prepare a session folder and screenshots directory when starting
-            prepareSessionFolderIfNeeded()
-            if sessionStart == nil { sessionStart = Date() }
-            startDate = Date()
-            // Seed focus tracking at start
+        if isRunning {
+            scheduleTick()
+            schedulePeriodicScreenshots()
+            // seed focus name
             if let app = NSWorkspace.shared.frontmostApplication {
                 lastActiveAppName = app.localizedName ?? app.bundleIdentifier ?? "UnknownApp"
             }
-            lastFocusChange = Date()
-            isRunning = true
-            scheduleTick()
-            scheduleScreenshotTick()
-            updateStartPauseTitle()
-        }
-    }
-
-    private func pause() {
-        if isRunning {
-            if let started = startDate { baseElapsed += Date().timeIntervalSince(started) }
-            // Account for focus time until pause
-            if let name = lastActiveAppName, let changed = lastFocusChange {
-                let delta = Date().timeIntervalSince(changed)
-                appDurations[name, default: 0] += max(0, delta)
-                lastFocusChange = Date()
-            }
-            startDate = nil
-            isRunning = false
+        } else {
             tickTimer?.invalidate(); tickTimer = nil
-            screenshotTimer?.invalidate(); screenshotTimer = nil
+            periodicShotTimer?.invalidate(); periodicShotTimer = nil
             focusShotTimer?.invalidate(); focusShotTimer = nil
             focusShotTargetApp = nil
-            updateStartPauseTitle()
-            updateStatusItemTitle()
         }
     }
 
+    @objc func endTask(_ sender: Any?) {
+        zig_on_end_task()
+        isRunning = false
+        updateStartPauseTitle()
+        tickTimer?.invalidate(); tickTimer = nil
+        periodicShotTimer?.invalidate(); periodicShotTimer = nil
+        focusShotTimer?.invalidate(); focusShotTimer = nil
+        focusShotTargetApp = nil
+        taskName = ""
+        taskNameItem?.title = "Set Task Name"
+        taskNameItem?.isEnabled = true
+    }
+
+    @objc func sayHello(_ sender: Any?) { NSLog("Hello from the tray menu!") }
+
+    @objc func doFingerprint(_ sender: Any?) {
+        let success = fingerprint()
+        NSLog("Fingerprint auth result: \(success)")
+    }
+
+    @objc func openTasksFolder(_ sender: Any?) {
+        var buf = [CChar](repeating: 0, count: 1024)
+        _ = zig_get_tasks_root_path(&buf, buf.count)
+        let path = String(cString: &buf)
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    // MARK: - Timers
     private func scheduleTick() {
         tickTimer?.invalidate()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateStatusItemTitle()
+            guard let self = self else { return }
+            var buf = [CChar](repeating: 0, count: 64)
+            _ = zig_on_tick_write_title(&buf, buf.count)
+            let title = String(cString: &buf)
+            self.statusItem?.button?.title = title
         }
         if let tickTimer { RunLoop.main.add(tickTimer, forMode: .common) }
     }
 
-    private func scheduleScreenshotTick() {
-        screenshotTimer?.invalidate()
-        screenshotTimer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
-            self?.takeScreenshot()
+    private func schedulePeriodicScreenshots() {
+        periodicShotTimer?.invalidate()
+        periodicShotTimer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { _ in
+            zig_on_periodic_screenshot()
         }
-        if let screenshotTimer { RunLoop.main.add(screenshotTimer, forMode: .common) }
-        // Capture immediately on start
-        takeScreenshot()
-    }
-
-    private func currentElapsed() -> TimeInterval {
-        if isRunning, let started = startDate {
-            return baseElapsed + Date().timeIntervalSince(started)
-        }
-        return baseElapsed
-    }
-
-    private func formatElapsed(_ seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        let s = seconds % 60
-        if h > 0 {
-            return String(format: "%d:%02d:%02d", h, m, s)
-        } else {
-            return String(format: "%02d:%02d", m, s)
-        }
-    }
-
-    private func updateStatusItemTitle() {
-        let secs = Int(currentElapsed().rounded())
-        let title = formatElapsed(secs)
-        statusItem?.button?.title = title
+        if let periodicShotTimer { RunLoop.main.add(periodicShotTimer, forMode: .common) }
+        // also request an immediate screenshot
+        zig_on_periodic_screenshot()
     }
 
     private func updateStartPauseTitle() {
         startPauseItem?.title = isRunning ? "Pause" : "Start"
     }
 
-    private func updateTooltip() {
-        if taskName.isEmpty {
-            statusItem?.button?.toolTip = ""
-        } else {
-            statusItem?.button?.toolTip = "Task: \(taskName)"
-        }
-    }
-
-    // MARK: - Setup
-    func attachStatusItem(_ item: NSStatusItem) {
-        self.statusItem = item
-        updateStatusItemTitle()
-        updateTooltip()
-    }
-
-    func setStartPauseItem(_ item: NSMenuItem) {
-        self.startPauseItem = item
-        updateStartPauseTitle()
-    }
-
-    func setTaskNameItem(_ item: NSMenuItem) {
-        self.taskNameItem = item
-        updateTaskNameItem()
-    }
-
-    private func updateTaskNameItem() {
-        guard let item = taskNameItem else { return }
-        if taskName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            item.title = "Set Task Name"
-            item.action = #selector(AppDelegate.setTaskName(_:))
-            item.isEnabled = true
-        } else {
-            item.title = taskName
-            item.action = nil
-            item.isEnabled = false
-        }
-    }
-
-    // MARK: - Focused app tracking
+    // MARK: - Focus observer
     private func installFocusObserver() {
         focusObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -232,169 +172,52 @@ private class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] note in
             guard let self = self else { return }
-            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-                let name = app.localizedName ?? app.bundleIdentifier ?? "UnknownApp"
-                if name != self.lastActiveAppName {
-                    if self.isRunning, let prev = self.lastActiveAppName, let changed = self.lastFocusChange {
-                        let delta = Date().timeIntervalSince(changed)
-                        self.appDurations[prev, default: 0] += max(0, delta)
-                    }
-                    self.lastActiveAppName = name
-                    self.lastFocusChange = Date()
-                    NSLog("Active app changed: \(name)")
-                    // Debounce screenshot by 5 seconds; only capture if still focused
-                    self.focusShotTimer?.invalidate()
-                    self.focusShotTargetApp = name
-                    self.focusShotTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
-                        guard let self = self else { return }
-                        guard self.isRunning else { return }
-                        let current = NSWorkspace.shared.frontmostApplication
-                        let currentName = current?.localizedName ?? current?.bundleIdentifier ?? "UnknownApp"
-                        if currentName == self.focusShotTargetApp {
-                            self.takeScreenshot()
-                        }
-                    }
-                    if let t = self.focusShotTimer { RunLoop.main.add(t, forMode: .common) }
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            let name = app.localizedName ?? app.bundleIdentifier ?? "UnknownApp"
+            if name == self.lastActiveAppName { return }
+            self.lastActiveAppName = name
+            NSLog("Active app changed: \(name)")
+            // Only track screenshots when a task is running
+            guard self.isRunning else { return }
+            self.focusShotTimer?.invalidate()
+            self.focusShotTargetApp = name
+            self.focusShotTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
+                guard self.isRunning else { return }
+                let current = NSWorkspace.shared.frontmostApplication
+                let currentName = current?.localizedName ?? current?.bundleIdentifier ?? "UnknownApp"
+                if currentName == self.focusShotTargetApp {
+                    name.withCString { zig_on_focus_changed_stable($0) }
                 }
             }
+            if let t = self.focusShotTimer { RunLoop.main.add(t, forMode: .common) }
         }
     }
 
-    // MARK: - Persistence
-    private func tasksRootURL() -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".zz", isDirectory: true)
-            .appendingPathComponent("tasks", isDirectory: true)
+    // Setup helpers
+    func attachStatusItem(_ item: NSStatusItem) {
+        self.statusItem = item
+        globalStatusItem = item
     }
-
-    private func ensureTasksRoot() {
-        let root = tasksRootURL()
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    }
-
-    private func sanitizedFolderName(from name: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_"))
-        let cleaned = String(name.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" })
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.isEmpty { return "task" }
-        return cleaned
-    }
-
-    private func prepareSessionFolderIfNeeded() {
-        if currentSessionFolderName == nil {
-            let dfStamp = DateFormatter()
-            dfStamp.dateFormat = "yyyyMMdd_HHmmss"
-            let stamp = dfStamp.string(from: Date())
-            let base = sanitizedFolderName(from: taskName.isEmpty ? "task" : taskName)
-            currentSessionFolderName = "\(base)_\(stamp)"
-        }
-        ensureTasksRoot()
-        if let name = currentSessionFolderName {
-            let folderURL = tasksRootURL().appendingPathComponent(name, isDirectory: true)
-            let shotsURL = folderURL.appendingPathComponent("screenshots", isDirectory: true)
-            try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            try? FileManager.default.createDirectory(at: shotsURL, withIntermediateDirectories: true)
-        }
-    }
-
-    private func screenshotsFolderURL() -> URL? {
-        guard let name = currentSessionFolderName else { return nil }
-        return tasksRootURL().appendingPathComponent(name, isDirectory: true)
-            .appendingPathComponent("screenshots", isDirectory: true)
-    }
-
-    private func takeScreenshot() {
-        guard let folder = screenshotsFolderURL() else { return }
-        guard let cgImage = CGWindowListCreateImage(.infinite, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]) else { return }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        guard let data = rep.representation(using: .jpeg, properties: [
-            .compressionFactor: 0.2
-        ]) else { return }
-
-        let df = DateFormatter()
-        df.dateFormat = "yyyyMMdd_HHmmss"
-        let name = "screenshot_\(df.string(from: Date())).jpeg"
-        let url = folder.appendingPathComponent(name, isDirectory: false)
-        do {
-            try data.write(to: url)
-        } catch {
-            NSLog("Failed to write screenshot: \(error.localizedDescription)")
-        }
-
-        NSLog("Captured screenshot: \(name)")
-    }
-
-    private func persistTask() {
-        ensureTasksRoot()
-        // Use existing session folder if available; otherwise create a fresh one
-        let folderURL: URL = {
-            if let name = currentSessionFolderName {
-                return tasksRootURL().appendingPathComponent(name, isDirectory: true)
-            }
-            let dfStamp = DateFormatter()
-            dfStamp.dateFormat = "yyyyMMdd_HHmmss"
-            let stamp = dfStamp.string(from: Date())
-            let base = sanitizedFolderName(from: taskName.isEmpty ? "task" : taskName)
-            let folderName = "\(base)_\(stamp)"
-            currentSessionFolderName = folderName
-            return tasksRootURL().appendingPathComponent(folderName, isDirectory: true)
-        }()
-        do {
-            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            let fileURL = folderURL.appendingPathComponent("TASK.md", isDirectory: false)
-
-            let df = DateFormatter()
-            df.dateFormat = "yyyy-MM-dd HH:mm:ss"
-            let startStr = sessionStart != nil ? df.string(from: sessionStart!) : df.string(from: Date())
-            let endStr = df.string(from: Date())
-
-            let secs = Int(baseElapsed.rounded())
-            let timeStr = formatElapsed(secs)
-
-            let title = taskName.isEmpty ? "task" : taskName
-            // finalize app focus time for last segment
-            if let prev = lastActiveAppName, let changed = lastFocusChange {
-                let delta = Date().timeIntervalSince(changed)
-                appDurations[prev, default: 0] += max(0, delta)
-            }
-            var appLines: [String] = []
-            for (appName, dur) in appDurations.sorted(by: { $0.value > $1.value }) {
-                let t = formatElapsed(Int(dur.rounded()))
-                appLines.append("  - \(appName): \(t)")
-            }
-            let appsSection = appLines.isEmpty ? "  - (no focus changes recorded)" : appLines.joined(separator: "\n")
-            let content = "# \(title)\n\n- Start: \(startStr)\n- End: \(endStr)\n- Duration: \(timeStr)\n- Screenshots: ./screenshots/\n\n## App Time\n\(appsSection)\n"
-            try content.write(to: fileURL, atomically: true, encoding: String.Encoding.utf8)
-        } catch {
-            NSLog("Failed to persist task: \(error.localizedDescription)")
-        }
-    }
-
-    @objc func openTasksFolder(_ sender: Any?) {
-        ensureTasksRoot()
-        NSWorkspace.shared.open(tasksRootURL())
-    }
+    func setStartPauseItem(_ item: NSMenuItem) { self.startPauseItem = item; updateStartPauseTitle() }
+    func setTaskNameItem(_ item: NSMenuItem) { self.taskNameItem = item }
 }
 
-// Keep strong references to objects that must live for the app lifetime
 private let appDelegate = AppDelegate()
 
 @_cdecl("startTray")
 public func startTray() {
     let app = NSApplication.shared
     app.delegate = appDelegate
-    app.setActivationPolicy(.accessory) // Hide from Dock; keep only status item
+    app.setActivationPolicy(.accessory)
 
-    // Create a status bar item; title will display elapsed time
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     if let button = item.button {
         button.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         button.toolTip = ""
+        button.title = "00:00"
     }
 
     let menu = NSMenu()
-
-    // Task controls
     let nameItem = NSMenuItem(title: "Set Task Name", action: #selector(AppDelegate.setTaskName(_:)), keyEquivalent: "")
     nameItem.target = appDelegate
     menu.addItem(nameItem)
@@ -408,12 +231,11 @@ public func startTray() {
     menu.addItem(endItem)
 
     menu.addItem(NSMenuItem.separator())
-
     let openTasks = NSMenuItem(title: "Open Tasks Folder", action: #selector(AppDelegate.openTasksFolder(_:)), keyEquivalent: "")
     openTasks.target = appDelegate
     menu.addItem(openTasks)
 
-    // Existing demo items
+    // menu.addItem(NSMenuItem.separator())
     // let helloItem = NSMenuItem(title: "Say Hello", action: #selector(AppDelegate.sayHello(_:)), keyEquivalent: "")
     // helloItem.target = appDelegate
     // menu.addItem(helloItem)
@@ -430,6 +252,5 @@ public func startTray() {
     appDelegate.setStartPauseItem(startPauseItem)
     appDelegate.setTaskNameItem(nameItem)
 
-    // Start the app run loop
     app.run()
 }

@@ -52,9 +52,13 @@ pub fn build(b: *std.Build) void {
     // exe_mod.addCSourceFile("build/sw-auth.o", .{});
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
-    const exe = b.addExecutable(.{ .name = "zz", .root_source_file = b.path("src/main.zig"), .optimize = optimize, .target = target });
+    const exe = b.addExecutable(.{ .name = "zz", .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .optimize = optimize, .target = target }) });
 
     exe.step.dependOn(swift_step);
+
+    // const ollama_dep = b.dependency("ollama", .{});
+    // const ollama_mod = ollama_dep.module("ollama");
+    // exe.root_module.addImport("ollama", ollama_mod);
 
     exe.addSystemIncludePath(.{ .cwd_relative = sdkPath("/macosx-sdks/include") });
     exe.addLibraryPath(.{ .cwd_relative = sdkPath("/macosx-sdks/lib") });
@@ -144,7 +148,11 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/test_all.zig"),
+            .optimize = optimize,
+            .target = target,
+        }),
         // .root_source_file = exe,
         // .root_module = exe_mod,
     });
