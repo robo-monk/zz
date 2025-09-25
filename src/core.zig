@@ -292,6 +292,39 @@ export fn zig_get_tasks_root_path(buf: [*]u8, buf_len: usize) callconv(.C) usize
     return n - 1;
 }
 
+// Returns a UTF-8 text snapshot of app usage times as lines:
+// "<app_name>\t<seconds>\n". Truncates to the provided buffer size.
+export fn zig_get_app_times(buf: [*]u8, buf_len: usize) callconv(.C) usize {
+    const st = ensureState();
+    var fbs = std.io.fixedBufferStream(buf[0..buf_len]);
+    const w = fbs.writer();
+
+    const now_s = nowEpochSeconds();
+    var it = st.app_times.iterator();
+    var last_added = false;
+    while (it.next()) |e| {
+        var secs = e.value_ptr.*;
+        if (st.is_running and st.last_focus_name.len != 0 and st.last_focus_change_s != 0 and
+            std.mem.eql(u8, e.key_ptr.*, st.last_focus_name))
+        {
+            secs += now_s - st.last_focus_change_s;
+            last_added = true;
+        }
+        if (secs == 0) continue;
+        // Format: name TAB seconds NEWLINE
+        _ = w.print("{s}\t{d}\n", .{ e.key_ptr.*, secs }) catch break;
+    }
+
+    if (!last_added and st.is_running and st.last_focus_name.len != 0 and st.last_focus_change_s != 0) {
+        const delta = now_s - st.last_focus_change_s;
+        if (delta > 0) {
+            _ = w.print("{s}\t{d}\n", .{ st.last_focus_name, delta }) catch {};
+        }
+    }
+
+    return fbs.pos;
+}
+
 // pub fn visionDescribeImage(allocator: std.mem.Allocator, image_path: []const u8) ![]const u8 {
 //     std.log.debug("Visually AIing...", .{});
 //     // 1) Read image & build data URL
